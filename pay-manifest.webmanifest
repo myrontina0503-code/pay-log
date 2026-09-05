@@ -1,0 +1,12 @@
+{
+  "name": "款項記錄",
+  "short_name": "款項記錄",
+  "start_url": "./款項記錄.html",
+  "display": "standalone",
+  "background_color": "#f0f0f2",
+  "theme_color": "#f5c518",
+  "icons": [
+    { "src": "pay-icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "pay-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
