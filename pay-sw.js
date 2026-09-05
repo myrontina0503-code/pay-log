@@ -1,5 +1,5 @@
 const CACHE = 'pay-log-v1';
-const ASSETS = ['./款項記錄.html', './pay-manifest.webmanifest', './pay-icon-180.png', './pay-icon-512.png'];
+const ASSETS = ['./', './index.html', './pay-manifest.webmanifest', './pay-icon-180.png', './pay-icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
