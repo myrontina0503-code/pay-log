@@ -263,7 +263,13 @@ async function idbSet(key,val){
 }
 
 /* ---------- Constants ---------- */
-const COLORS = ['#2564b0','#c0392b','#17936b','#8a5cd1','#d18a1c','#c25a9e'];
+const COLORS = ['#2564b0','#c0392b','#17936b','#8a5cd1','#d18a1c','#c25a9e','#1a9a9a','#5b6bd6','#c76b2e','#7a8c1f'];
+function catColor(name){
+  let hash = 0;
+  const s = String(name||'');
+  for (let i=0;i<s.length;i++){ hash = (hash*31 + s.charCodeAt(i)) >>> 0; }
+  return COLORS[hash % COLORS.length];
+}
 const BILL_CATS = ['房貸','車貸','房租','保險','水費','電費','瓦斯費','網路/電話','管理費','稅金','訂閱','其他'];
 const EXP_CATS = ['餐飲','交通','日用品','治裝','醫療','娛樂','教育','其他'];
 const CYCLES = [{v:1,l:'每月'},{v:2,l:'每兩月'},{v:3,l:'每季'},{v:6,l:'每半年'},{v:12,l:'每年'}];
@@ -464,7 +470,7 @@ function renderHome(){
       <div class="pill-card ${cardCls}">
         <div class="info">
           <div class="nm">${escapeHtml(x.bill.name)}</div>
-          <div class="cat">${escapeHtml(x.bill.category)}${x.bill.estAmount?' · 約'+fmtMoney(x.bill.estAmount):''}</div>
+          <div class="cat"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${catColor(x.bill.category)};margin-right:4px;vertical-align:middle"></span>${escapeHtml(x.bill.category)}${x.bill.estAmount?' · 約'+fmtMoney(x.bill.estAmount):''}</div>
         </div>
         <button class="pay-btn ${x.paid?'paid':''}" data-act="pay-toggle" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">
           ${x.paid ? '已繳 ✓' : (x.overdue?'逾期<span class="arrow">→</span>':'pay<span class="arrow">→</span>')}
@@ -566,7 +572,7 @@ function renderExpense(){
       <span class="dot" style="background:${mem?mem.color:'#999'}"></span>
       <div class="main">
         <div class="store">${escapeHtml(e.store||e.category)}</div>
-        <div class="meta">${escapeHtml(mem?mem.name:'')} · ${escapeHtml(e.category)} · ${fmtDShort(e.date)}${e.note?' · '+escapeHtml(e.note):''}</div>
+        <div class="meta">${escapeHtml(mem?mem.name:'')} · <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${catColor(e.category)};margin-right:3px;vertical-align:middle"></span>${escapeHtml(e.category)} · ${fmtDShort(e.date)}${e.note?' · '+escapeHtml(e.note):''}</div>
       </div>
       <div class="amt">${fmtMoney(e.amount)}</div>
     </div>`;
@@ -622,9 +628,11 @@ function renderDash(){
   }
   const distTotal = Object.values(dist).reduce((a,b)=>a+b,0) || 1;
   const clickable = ui.dashDist==='cat';
-  const distRows = Object.entries(dist).sort((a,b)=>b[1]-a[1]).map(([k,v],i)=>{
+  const distRows = Object.entries(dist).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
     const pct = Math.round(v/distTotal*100);
-    const color = COLORS[i%COLORS.length];
+    let color;
+    if (clickable) color = catColor(k);
+    else { const mem = activeMembers().find(m=>m.name===k); color = mem ? mem.color : '#6b7078'; }
     return `<div class="dist-row" ${clickable?`data-act="dist-detail" data-cat="${escapeHtml(k)}" style="cursor:pointer"`:''}><div class="lbl">${escapeHtml(k)}</div><div class="track"><i style="width:${pct}%;background:${color}"></i></div><div class="val">${fmtMoney(v)}</div></div>`;
   }).join('');
 
@@ -990,10 +998,11 @@ function openCategoryDetail(cat, year){
   const monthTotals = Array(12).fill(0);
   entries.forEach(e=>{ monthTotals[e.month-1] += e.amount; });
   const maxV = Math.max(1, ...monthTotals);
+  const barColor = catColor(cat);
   const bars = monthTotals.map((v,i)=>{
     const h = Math.max(3, Math.round(v/maxV*60));
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-      <div style="width:10px;height:60px;display:flex;align-items:flex-end"><div style="width:100%;height:${h}px;border-radius:4px;background:var(--yellow)"></div></div>
+      <div style="width:10px;height:60px;display:flex;align-items:flex-end"><div style="width:100%;height:${h}px;border-radius:4px;background:${barColor}"></div></div>
       <div style="font-size:10px;color:var(--muted);font-weight:700">${i+1}</div>
     </div>`;
   }).join('');
