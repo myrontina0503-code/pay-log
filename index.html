@@ -335,17 +335,27 @@ async function fbPut(dbUrl, data){
 }
 let syncing=false;
 async function doSync(alertOnFail){
-  if (!syncCfg || !syncCfg.dbUrl || syncing) return;
+  if (!syncCfg || !syncCfg.dbUrl || syncing) return false;
   syncing = true;
   try {
     const remote = await fbGetRemote(syncCfg.dbUrl);
+    if (remote === null && alertOnFail) {
+      // fbGetRemote returns null both for "empty database" and "request failed (res.ok false)".
+      // Re-check with a plain fetch so we can tell a bad URL apart from a genuinely empty DB.
+      const check = await fetch(syncCfg.dbUrl.replace(/\/$/,'') + '/bill_state.json', {cache:'no-store'});
+      if (!check.ok) throw new Error('讀取失敗(HTTP '+check.status+'),請確認金鑰網址是否正確');
+    }
     state = mergeState(state, remote || {});
     await saveState();
-    await fbPut(syncCfg.dbUrl, state);
+    const putOk = await fbPut(syncCfg.dbUrl, state);
+    if (!putOk) throw new Error('寫入失敗,請確認金鑰網址是否正確');
     syncCfg.lastSync = Date.now();
     await saveSyncCfg();
+    if (alertOnFail) alert('已同步!');
+    return true;
   } catch(e){
-    if (alertOnFail) alert('同步失敗,請檢查網路連線或同步金鑰是否正確');
+    if (alertOnFail) alert('同步失敗:'+(e.message||'請檢查網路連線或同步金鑰是否正確'));
+    return false;
   } finally { syncing=false; }
 }
 let syncTimer=null;
