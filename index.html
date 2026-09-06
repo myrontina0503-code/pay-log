@@ -271,7 +271,7 @@ const REMINDERS = [0,1,3,5,7];
 const WEEKDAYS = ['日','一','二','三','四','五','六'];
 
 /* ---------- State ---------- */
-let state = { members:[], bills:[], payments:[], expenses:[] };
+let state = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[] };
 let syncCfg = null;
 let ui = {
   tab:'home',
@@ -292,8 +292,11 @@ function billById(id){ return state.bills.find(b=>b.id===id); }
 
 async function loadState(){
   const s = await idbGet(KEY);
-  state = (s && s.members) ? Object.assign({members:[],bills:[],payments:[],expenses:[]}, s) : { members:[], bills:[], payments:[], expenses:[] };
+  const blank = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[] };
+  state = (s && s.members) ? Object.assign(blank, s) : blank;
 }
+function allBillCats(){ return [...BILL_CATS, ...(state.customBillCats||[])]; }
+function allExpCats(){ return [...EXP_CATS, ...(state.customExpCats||[])]; }
 let saveTimer=null;
 function saveState(){
   clearTimeout(saveTimer);
@@ -314,12 +317,17 @@ function mergeArr(localArr, remoteArr){
   });
   return Array.from(map.values());
 }
+function mergeCatArr(localArr, remoteArr){
+  return Array.from(new Set([...(localArr||[]), ...(remoteArr||[])]));
+}
 function mergeState(local, remote){
   return {
     members: mergeArr(local.members, remote && remote.members),
     bills: mergeArr(local.bills, remote && remote.bills),
     payments: mergeArr(local.payments, remote && remote.payments),
     expenses: mergeArr(local.expenses, remote && remote.expenses),
+    customBillCats: mergeCatArr(local.customBillCats, remote && remote.customBillCats),
+    customExpCats: mergeCatArr(local.customExpCats, remote && remote.customExpCats),
   };
 }
 async function fbGetRemote(dbUrl){
@@ -465,7 +473,7 @@ function renderHome(){
     </div>
     ${expanded ? `<div class="detail-panel">
       <div class="detail-row"><span class="k">到期日</span><span class="v">${x.due}</span></div>
-      <div class="detail-row"><span class="k">頻率</span><span class="v">${CYCLES.find(c=>c.v===x.bill.cycleMonths)?.l||''}</span></div>
+      <div class="detail-row"><span class="k">頻率</span><span class="v">${CYCLES.find(c=>c.v===x.bill.cycleMonths)?.l||''}${x.bill.cycleMonths===2?(x.bill.anchorMonth%2===0?'(雙月)':'(奇月)'):''}</span></div>
       <div class="detail-row"><span class="k">預估金額</span><span class="v">${x.bill.estAmount?fmtMoney(x.bill.estAmount):'—'}</span></div>
       ${pay ? `<div class="detail-row"><span class="k">實繳金額</span><span class="v">${fmtMoney(pay.amount)}(${pay.paidDate})</span></div>` : ''}
       ${x.bill.note ? `<div class="detail-row"><span class="k">備註</span><span class="v">${escapeHtml(x.bill.note)}</span></div>` : ''}
@@ -613,10 +621,11 @@ function renderDash(){
     monthExps.forEach(e=>{ const mem=memberById(e.memberId); const k=mem?mem.name:'其他'; dist[k]=(dist[k]||0)+e.amount; });
   }
   const distTotal = Object.values(dist).reduce((a,b)=>a+b,0) || 1;
+  const clickable = ui.dashDist==='cat';
   const distRows = Object.entries(dist).sort((a,b)=>b[1]-a[1]).map(([k,v],i)=>{
     const pct = Math.round(v/distTotal*100);
     const color = COLORS[i%COLORS.length];
-    return `<div class="dist-row"><div class="lbl">${escapeHtml(k)}</div><div class="track"><i style="width:${pct}%;background:${color}"></i></div><div class="val">${fmtMoney(v)}</div></div>`;
+    return `<div class="dist-row" ${clickable?`data-act="dist-detail" data-cat="${escapeHtml(k)}" style="cursor:pointer"`:''}><div class="lbl">${escapeHtml(k)}</div><div class="track"><i style="width:${pct}%;background:${color}"></i></div><div class="val">${fmtMoney(v)}</div></div>`;
   }).join('');
 
   return `
@@ -643,6 +652,7 @@ function renderDash(){
       </span>
     </h2>
     ${distRows || '<div class="empty">尚無支出紀錄</div>'}
+    ${clickable && distRows ? '<div class="hint" style="margin-top:6px">點分類可看該分類的每月圖表與明細</div>' : ''}
   </div>
   `;
 }
@@ -698,13 +708,21 @@ function renderSettings(){
 function openBillForm(bill){
   const isNew = !bill;
   const b = bill ? {...bill} : { id:null, name:'', category:BILL_CATS[0], cycleMonths:1, dueDay:1, estAmount:'', reminderDays:3, note:'' };
+  const curParity = (b.anchorMonth!=null ? b.anchorMonth : currentYM().m) % 2 === 0 ? 'even' : 'odd';
   const dlg = document.getElementById('dlg');
   document.getElementById('dlgBody').innerHTML = `
     <div class="dlg-title">${isNew?'新增固定支出':'編輯固定支出'}</div>
     <div class="form-grid">
       <div class="field"><label>名稱</label><input type="text" id="f-name" value="${escapeHtml(b.name)}" placeholder="例如:電費"></div>
-      <div class="field"><label>分類</label><div class="chips" id="f-cat">${BILL_CATS.map(c=>`<button class="chip ${b.category===c?'on':''}" data-v="${c}">${c}</button>`).join('')}</div></div>
+      <div class="field"><label>分類</label><div class="chips" id="f-cat">${allBillCats().map(c=>`<button class="chip ${b.category===c?'on':''}" data-v="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}<button class="chip" data-add="1">＋新增</button></div></div>
       <div class="field"><label>頻率</label><div class="chips" id="f-cycle">${CYCLES.map(c=>`<button class="chip ${b.cycleMonths===c.v?'on':''}" data-v="${c.v}">${c.l}</button>`).join('')}</div></div>
+      <div class="field" id="f-parity-wrap" style="display:${b.cycleMonths===2?'block':'none'}">
+        <label>雙月還是奇月繳費</label>
+        <div class="chips" id="f-parity">
+          <button class="chip ${curParity==='even'?'on':''}" data-v="even">雙月(2,4,6,8,10,12)</button>
+          <button class="chip ${curParity==='odd'?'on':''}" data-v="odd">奇月(1,3,5,7,9,11)</button>
+        </div>
+      </div>
       <div class="field"><label>每期到期日(幾號)</label><input type="number" id="f-day" min="1" max="31" value="${b.dueDay}"></div>
       <div class="field"><label>提前幾天提醒</label><div class="chips" id="f-remind">${REMINDERS.map(r=>`<button class="chip ${b.reminderDays===r?'on':''}" data-v="${r}">${r===0?'準時':'提前'+r+'天'}</button>`).join('')}</div></div>
       <div class="field"><label>預估金額(選填)</label><input type="number" id="f-amt" value="${b.estAmount||''}" placeholder="0"></div>
@@ -716,8 +734,17 @@ function openBillForm(bill){
     </div>
   `;
   dlg.showModal();
-  document.getElementById('f-cat').onclick = (e)=>{ const t=e.target.closest('button'); if(!t) return; document.querySelectorAll('#f-cat .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
-  document.getElementById('f-cycle').onclick = (e)=>{ const t=e.target.closest('button'); if(!t) return; document.querySelectorAll('#f-cycle .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
+  document.getElementById('f-cat').onclick = (e)=>{
+    const t=e.target.closest('button'); if(!t) return;
+    if (t.dataset.add){ addCustomCat('bill', 'f-cat'); return; }
+    document.querySelectorAll('#f-cat .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+  };
+  document.getElementById('f-cycle').onclick = (e)=>{
+    const t=e.target.closest('button'); if(!t) return;
+    document.querySelectorAll('#f-cycle .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+    document.getElementById('f-parity-wrap').style.display = (t.dataset.v==='2') ? 'block' : 'none';
+  };
+  document.getElementById('f-parity').onclick = (e)=>{ const t=e.target.closest('button'); if(!t) return; document.querySelectorAll('#f-parity .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
   document.getElementById('f-remind').onclick = (e)=>{ const t=e.target.closest('button'); if(!t) return; document.querySelectorAll('#f-remind .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
   document.getElementById('dlgClose').onclick = ()=> dlg.close();
   document.getElementById('dlgSave').onclick = async ()=>{
@@ -732,10 +759,20 @@ function openBillForm(bill){
     const now = Date.now();
     if (isNew){
       const {y,m} = currentYM();
-      state.bills.push({ id:uid(), name, category, cycleMonths, dueDay, estAmount, reminderDays, note, anchorYear:y, anchorMonth:m, up:now, deleted:false });
+      let anchorMonth = m;
+      if (cycleMonths === 2){
+        const parity = document.querySelector('#f-parity .chip.on')?.dataset.v || 'even';
+        anchorMonth = parity==='even' ? 2 : 1;
+      }
+      state.bills.push({ id:uid(), name, category, cycleMonths, dueDay, estAmount, reminderDays, note, anchorYear:y, anchorMonth, up:now, deleted:false });
     } else {
       const target = billById(b.id);
-      Object.assign(target, { name, category, cycleMonths, dueDay, estAmount, reminderDays, note, up:now });
+      let anchorMonth = target.anchorMonth;
+      if (cycleMonths === 2){
+        const parity = document.querySelector('#f-parity .chip.on')?.dataset.v || 'even';
+        anchorMonth = parity==='even' ? 2 : 1;
+      }
+      Object.assign(target, { name, category, cycleMonths, dueDay, estAmount, reminderDays, note, anchorMonth, up:now });
     }
     await saveState();
     dlg.close();
@@ -784,7 +821,7 @@ function openExpenseForm(exp){
       <div class="field"><label>家人</label><div class="chips" id="x-member">${activeMembers().map(m=>`<button class="chip ${e.memberId===m.id?'on':''}" data-v="${m.id}">${escapeHtml(m.name)}</button>`).join('')}</div></div>
       <div class="field"><label>金額</label><input type="number" id="x-amt" value="${e.amount||''}" placeholder="0"></div>
       <div class="field"><label>店家(選填)</label><input type="text" id="x-store" value="${escapeHtml(e.store||'')}" placeholder="例如:全聯"></div>
-      <div class="field"><label>分類</label><div class="chips" id="x-cat">${EXP_CATS.map(c=>`<button class="chip ${e.category===c?'on':''}" data-v="${c}">${c}</button>`).join('')}</div></div>
+      <div class="field"><label>分類</label><div class="chips" id="x-cat">${allExpCats().map(c=>`<button class="chip ${e.category===c?'on':''}" data-v="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}<button class="chip" data-add="1">＋新增</button></div></div>
       <div class="field"><label>日期</label><input type="date" id="x-date" value="${e.date}"></div>
       <div class="field"><label>備註(選填)</label><textarea id="x-note">${escapeHtml(e.note||'')}</textarea></div>
     </div>
@@ -796,7 +833,11 @@ function openExpenseForm(exp){
   `;
   dlg.showModal();
   document.getElementById('x-member').onclick = (ev)=>{ const t=ev.target.closest('button'); if(!t) return; document.querySelectorAll('#x-member .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
-  document.getElementById('x-cat').onclick = (ev)=>{ const t=ev.target.closest('button'); if(!t) return; document.querySelectorAll('#x-cat .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
+  document.getElementById('x-cat').onclick = (ev)=>{
+    const t=ev.target.closest('button'); if(!t) return;
+    if (t.dataset.add){ addCustomCat('exp', 'x-cat'); return; }
+    document.querySelectorAll('#x-cat .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+  };
   document.getElementById('dlgClose').onclick = ()=> dlg.close();
   const delBtn = dlg.querySelector('[data-act="del-expense-inline"]');
   if (delBtn) delBtn.onclick = async ()=>{
@@ -826,6 +867,22 @@ function openExpenseForm(exp){
     render();
     scheduleSync();
   };
+}
+
+/* ---------- Custom categories ---------- */
+async function addCustomCat(kind, chipsId){
+  const name = (prompt('新增分類名稱') || '').trim();
+  if (!name) return;
+  const list = kind==='bill' ? allBillCats() : allExpCats();
+  if (!list.includes(name)){
+    if (kind==='bill'){ state.customBillCats = state.customBillCats||[]; state.customBillCats.push(name); }
+    else { state.customExpCats = state.customExpCats||[]; state.customExpCats.push(name); }
+    await saveState();
+    scheduleSync();
+  }
+  const wrap = document.getElementById(chipsId);
+  const fresh = kind==='bill' ? allBillCats() : allExpCats();
+  wrap.innerHTML = fresh.map(c=>`<button class="chip ${c===name?'on':''}" data-v="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('') + `<button class="chip" data-add="1">＋新增</button>`;
 }
 
 /* ---------- Category guessing (by store name keyword) ---------- */
@@ -911,6 +968,46 @@ function openImportCsv(){
   };
 }
 
+/* ---------- Category detail (chart + list) ---------- */
+function categoryEntries(cat, year){
+  const list = [];
+  activePayments().forEach(p=>{
+    if (!p.period.startsWith(year+'-')) return;
+    const bill = billById(p.billId);
+    if (!bill || bill.category!==cat) return;
+    list.push({ date:p.paidDate, month:parseInt(p.period.split('-')[1],10), label:bill.name, amount:p.amount });
+  });
+  activeExpenses().forEach(e=>{
+    if (!e.date.startsWith(year+'-') || e.category!==cat) return;
+    list.push({ date:e.date, month:parseInt(e.date.split('-')[1],10), label:e.store||e.category, amount:e.amount });
+  });
+  return list.sort((a,b)=> b.date < a.date ? -1 : (b.date>a.date?1:0));
+}
+function openCategoryDetail(cat, year){
+  const entries = categoryEntries(cat, year);
+  const monthTotals = Array(12).fill(0);
+  entries.forEach(e=>{ monthTotals[e.month-1] += e.amount; });
+  const maxV = Math.max(1, ...monthTotals);
+  const bars = monthTotals.map((v,i)=>{
+    const h = Math.max(3, Math.round(v/maxV*60));
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+      <div style="width:10px;height:60px;display:flex;align-items:flex-end"><div style="width:100%;height:${h}px;border-radius:4px;background:var(--yellow)"></div></div>
+      <div style="font-size:10px;color:var(--muted);font-weight:700">${i+1}</div>
+    </div>`;
+  }).join('');
+  const total = entries.reduce((s,e)=>s+e.amount,0);
+  const rows = entries.map(e=>`<div class="exp-row"><div class="main"><div class="store">${escapeHtml(e.label)}</div><div class="meta">${e.date}</div></div><div class="amt">${fmtMoney(e.amount)}</div></div>`).join('');
+  const dlg = document.getElementById('dlg');
+  document.getElementById('dlgBody').innerHTML = `
+    <div class="dlg-title">${escapeHtml(cat)} · ${year}年共 ${fmtMoney(total)}</div>
+    <div style="display:flex;gap:4px;margin-bottom:16px">${bars}</div>
+    <div style="max-height:50dvh;overflow:auto">${rows || '<div class="empty">今年這個分類還沒有紀錄</div>'}</div>
+    <div class="dlg-actions"><button class="cancel" id="dlgClose" style="flex:1">關閉</button></div>
+  `;
+  dlg.showModal();
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+}
+
 function confirmDialog(msg, onOk){
   const dlg = document.getElementById('dlg');
   document.getElementById('dlgBody').innerHTML = `
@@ -971,6 +1068,7 @@ function bindEvents(){
     else if (act==='dash-next-year'){ ui.dashYear++; render(); }
     else if (act==='dash-pick-month'){ ui.dashMonth = parseInt(t.dataset.m,10); render(); }
     else if (act==='dash-dist'){ ui.dashDist = t.dataset.d; render(); }
+    else if (act==='dist-detail'){ openCategoryDetail(t.dataset.cat, ui.dashYear); }
     else if (act==='add-member'){ addMember(); }
     else if (act==='del-member'){ delMember(t.dataset.id); }
     else if (act==='export-json'){ exportJson(); }
@@ -1052,7 +1150,7 @@ function importJson(){
       const data = JSON.parse(text);
       if (!data.members) throw new Error('格式不符');
       confirmDialog('匯入會覆蓋目前裝置上的所有記錄,確定嗎?', async ()=>{
-        state = Object.assign({members:[],bills:[],payments:[],expenses:[]}, data);
+        state = Object.assign({members:[],bills:[],payments:[],expenses:[],customBillCats:[],customExpCats:[]}, data);
         await saveState();
         render();
         scheduleSync();
