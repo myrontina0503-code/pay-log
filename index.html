@@ -522,7 +522,11 @@ function renderCal(){
     const dayInsts = insts.filter(x=>x.due===dstr);
     const isToday = dstr===todayStr();
     const isSel = ui.calSel===dstr;
-    const tags = dayInsts.slice(0,2).map(x=>`<span class="tag ${x.paid?'paid':(x.overdue?'overdue':'')}">${escapeHtml(x.bill.name.slice(0,1))}到</span>`).join('');
+    const tags = dayInsts.slice(0,2).map(x=>{
+      if (x.paid) return `<span class="tag paid">${escapeHtml(x.bill.category)}</span>`;
+      if (x.overdue) return `<span class="tag overdue">${escapeHtml(x.bill.category)}</span>`;
+      return `<span class="tag" style="background:${catColor(x.bill.category)};color:#fff">${escapeHtml(x.bill.category)}</span>`;
+    }).join('');
     cells += `<div class="cal-day ${isToday?'today':''} ${isSel?'sel':''}" data-act="cal-pick" data-d="${dstr}">${d}${tags}</div>`;
   }
   const selInsts = ui.calSel ? insts.filter(x=>x.due===ui.calSel) : [];
