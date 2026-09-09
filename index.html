@@ -90,15 +90,17 @@ main { flex:1; padding:6px 16px calc(88px + env(safe-area-inset-bottom)); }
 .date-badge .d { font-size:19px; line-height:1.1; }
 .date-badge.overdue { background:var(--danger); color:#fff; }
 .date-badge.paid { background:var(--sunken); color:var(--ink2); }
+.date-badge.snoozed { background:var(--sunken); color:var(--ink2); border:1.5px dashed var(--muted); }
 
 .pill-card { flex:1; min-width:0; background:var(--yellow); border-radius:16px; padding:14px 14px; display:flex; align-items:center; gap:10px; }
 .pill-card.paid { background:var(--sunken); }
+.pill-card.snoozed { background:var(--sunken); border:1.5px dashed var(--muted); }
 .pill-card.overdue { background:var(--danger-soft); border:1.5px solid var(--danger); }
 .pill-card .info { flex:1; min-width:0; }
 .pill-card .nm { font-size:16px; font-weight:800; color:var(--on-yellow); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.pill-card.paid .nm, .pill-card.overdue .nm { color:var(--ink); }
+.pill-card.paid .nm, .pill-card.overdue .nm, .pill-card.snoozed .nm { color:var(--ink); }
 .pill-card .cat { font-size:11px; color:rgba(21,22,26,.6); font-weight:700; margin-top:1px; }
-.pill-card.paid .cat, .pill-card.overdue .cat { color:var(--muted); }
+.pill-card.paid .cat, .pill-card.overdue .cat, .pill-card.snoozed .cat { color:var(--muted); }
 .pill-card .amt { font-size:12px; font-weight:700; color:rgba(21,22,26,.65); margin-top:2px; }
 .pay-btn { flex:none; display:flex; flex-direction:column; align-items:center; font-size:11px; font-weight:900; color:var(--on-yellow); }
 .pay-btn .arrow { font-size:14px; }
@@ -277,7 +279,7 @@ const REMINDERS = [0,1,3,5,7];
 const WEEKDAYS = ['日','一','二','三','四','五','六'];
 
 /* ---------- State ---------- */
-let state = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[] };
+let state = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[] };
 let syncCfg = null;
 let ui = {
   tab:'home',
@@ -293,12 +295,17 @@ function activeMembers(){ return state.members.filter(m=>!m.deleted); }
 function activeBills(){ return state.bills.filter(b=>!b.deleted); }
 function activePayments(){ return state.payments.filter(p=>!p.deleted); }
 function activeExpenses(){ return state.expenses.filter(e=>!e.deleted); }
+function activeSnoozes(){ return (state.snoozes||[]).filter(s=>!s.deleted); }
+function snoozeUntilFor(billId, period){
+  const s = activeSnoozes().find(x=>x.billId===billId && x.period===period);
+  return s ? s.snoozeUntil : null;
+}
 function memberById(id){ return state.members.find(m=>m.id===id); }
 function billById(id){ return state.bills.find(b=>b.id===id); }
 
 async function loadState(){
   const s = await idbGet(KEY);
-  const blank = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[] };
+  const blank = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[] };
   state = (s && s.members) ? Object.assign(blank, s) : blank;
 }
 function allBillCats(){ return [...BILL_CATS, ...(state.customBillCats||[])]; }
@@ -332,6 +339,7 @@ function mergeState(local, remote){
     bills: mergeArr(local.bills, remote && remote.bills),
     payments: mergeArr(local.payments, remote && remote.payments),
     expenses: mergeArr(local.expenses, remote && remote.expenses),
+    snoozes: mergeArr(local.snoozes, remote && remote.snoozes),
     customBillCats: mergeCatArr(local.customBillCats, remote && remote.customBillCats),
     customExpCats: mergeCatArr(local.customExpCats, remote && remote.customExpCats),
   };
@@ -403,12 +411,15 @@ function paymentFor(billId,y,m){
   return activePayments().find(p=>p.billId===billId && p.period===ymKey(y,m));
 }
 function instancesForMonth(y,m){
+  const t = todayStr();
   return activeBills().map(b=>{
     const due = dueInMonth(b,y,m);
     if (!due) return null;
     const paid = isPaid(b.id,y,m);
-    const overdue = !paid && due < todayStr();
-    return { bill:b, due, y, m, paid, overdue };
+    const overdue = !paid && due < t;
+    const snoozeUntil = snoozeUntilFor(b.id, ymKey(y,m));
+    const snoozed = !paid && !!snoozeUntil && snoozeUntil > t;
+    return { bill:b, due, y, m, paid, overdue, snoozed, snoozeUntil };
   }).filter(Boolean);
 }
 function upcomingReminders(){
@@ -417,7 +428,7 @@ function upcomingReminders(){
   const nxt = addMonths(y,m,1);
   const all = [...instancesForMonth(y,m), ...instancesForMonth(nxt.y,nxt.m)];
   return all.filter(x=>{
-    if (x.paid) return false;
+    if (x.paid || x.snoozed) return false;
     if (x.due < t) return true; // overdue
     const days = Math.round((new Date(x.due) - new Date(t)) / 86400000);
     return days <= (x.bill.reminderDays ?? 3);
@@ -459,11 +470,16 @@ function renderHome(){
   const unpaidCount = all.length - paidCount;
 
   const rows = insts.map(x=>{
-    const badgeCls = x.paid ? 'paid' : (x.overdue ? 'overdue' : '');
-    const cardCls = x.paid ? 'paid' : (x.overdue ? 'overdue' : '');
+    const badgeCls = x.paid ? 'paid' : (x.snoozed ? 'snoozed' : (x.overdue ? 'overdue' : ''));
+    const cardCls = badgeCls;
     const [,mm,dd] = x.due.split('-');
     const expanded = ui.expandedId === x.bill.id+x.due;
     const pay = paymentFor(x.bill.id,x.y,x.m);
+    let btnLabel;
+    if (x.paid) btnLabel = '已繳 ✓';
+    else if (x.snoozed) btnLabel = `延後至${fmtDShort(x.snoozeUntil)}`;
+    else if (x.overdue) btnLabel = '逾期<span class="arrow">→</span>';
+    else btnLabel = 'pay<span class="arrow">→</span>';
     return `
     <div class="item-row" data-act="toggle-expand" data-key="${x.bill.id+x.due}">
       <div class="date-badge ${badgeCls}"><span class="m">${parseInt(mm)}月</span><span class="d">${parseInt(dd)}</span></div>
@@ -472,9 +488,7 @@ function renderHome(){
           <div class="nm">${escapeHtml(x.bill.name)}</div>
           <div class="cat"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${catColor(x.bill.category)};margin-right:4px;vertical-align:middle"></span>${escapeHtml(x.bill.category)}${x.bill.estAmount?' · 約'+fmtMoney(x.bill.estAmount):''}</div>
         </div>
-        <button class="pay-btn ${x.paid?'paid':''}" data-act="pay-toggle" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">
-          ${x.paid ? '已繳 ✓' : (x.overdue?'逾期<span class="arrow">→</span>':'pay<span class="arrow">→</span>')}
-        </button>
+        <button class="pay-btn ${x.paid?'paid':''}" data-act="pay-toggle" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">${btnLabel}</button>
       </div>
     </div>
     ${expanded ? `<div class="detail-panel">
@@ -482,10 +496,12 @@ function renderHome(){
       <div class="detail-row"><span class="k">頻率</span><span class="v">${CYCLES.find(c=>c.v===x.bill.cycleMonths)?.l||''}${x.bill.cycleMonths!==1?`(${monthsForCycle(x.bill.cycleMonths,x.bill.anchorMonth).join('、')}月)`:''}</span></div>
       <div class="detail-row"><span class="k">預估金額</span><span class="v">${x.bill.estAmount?fmtMoney(x.bill.estAmount):'—'}</span></div>
       ${pay ? `<div class="detail-row"><span class="k">實繳金額</span><span class="v">${fmtMoney(pay.amount)}(${pay.paidDate})</span></div>` : ''}
+      ${x.snoozed ? `<div class="detail-row"><span class="k">延後提醒至</span><span class="v">${x.snoozeUntil}</span></div>` : ''}
       ${x.bill.note ? `<div class="detail-row"><span class="k">備註</span><span class="v">${escapeHtml(x.bill.note)}</span></div>` : ''}
       <div class="detail-actions">
         <button data-act="edit-bill" data-id="${x.bill.id}">編輯項目</button>
         ${x.paid ? `<button class="del" data-act="unpay" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">取消已繳</button>` : ''}
+        ${x.snoozed ? `<button class="del" data-act="unsnooze" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">取消延後</button>` : ''}
         <button class="del" data-act="del-bill" data-id="${x.bill.id}">刪除項目</button>
       </div>
     </div>` : ''}
@@ -536,7 +552,7 @@ function renderCal(){
         <div class="store">${escapeHtml(x.bill.name)}</div>
         <div class="meta">${escapeHtml(x.bill.category)} · ${x.due}到期</div>
       </div>
-      <button class="pay-btn ${x.paid?'paid':''}" data-act="pay-toggle" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">${x.paid?'已繳 ✓':'pay →'}</button>
+      <button class="pay-btn ${x.paid?'paid':''}" data-act="pay-toggle" data-id="${x.bill.id}" data-y="${x.y}" data-m="${x.m}">${x.paid?'已繳 ✓':(x.snoozed?'延後至'+fmtDShort(x.snoozeUntil):'pay →')}</button>
     </div>`).join('');
   return `
   <div class="h-title" style="font-size:26px">${monthLabel(y,m)}</div>
@@ -788,6 +804,64 @@ function openBillForm(bill){
       const target = billById(b.id);
       Object.assign(target, { name, category, cycleMonths, dueDay, estAmount, reminderDays, note, anchorMonth, up:now });
     }
+    await saveState();
+    dlg.close();
+    render();
+    scheduleSync();
+  };
+}
+
+/* ---------- Bill action choice (done vs snooze) ---------- */
+function openBillAction(billId,y,m){
+  const bill = billById(billId);
+  const due = dueInMonth(bill,y,m) || dueDateStr(bill,y,m);
+  const dlg = document.getElementById('dlg');
+  document.getElementById('dlgBody').innerHTML = `
+    <div class="dlg-title">${escapeHtml(bill.name)} · ${due}到期</div>
+    <div class="form-grid">
+      <button class="ok" id="actDone" style="padding:14px">✅ 標記完成</button>
+      <button class="cancel" id="actSnooze" style="padding:14px">⏰ 延後提醒(不影響下次循環)</button>
+      <button class="cancel" id="dlgClose" style="padding:14px">取消</button>
+    </div>
+  `;
+  dlg.showModal();
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  document.getElementById('actDone').onclick = ()=>{ dlg.close(); openPayConfirm(billId,y,m); };
+  document.getElementById('actSnooze').onclick = ()=>{ dlg.close(); openSnoozeForm(billId,y,m); };
+}
+
+/* ---------- Snooze (delay this occurrence only) ---------- */
+function openSnoozeForm(billId,y,m){
+  const bill = billById(billId);
+  const period = ymKey(y,m);
+  const quick = [ {l:'明天',days:1}, {l:'3天後',days:3}, {l:'1週後',days:7}, {l:'2週後',days:14} ];
+  const dlg = document.getElementById('dlg');
+  document.getElementById('dlgBody').innerHTML = `
+    <div class="dlg-title">延後提醒:${escapeHtml(bill.name)}</div>
+    <div class="hint" style="margin-bottom:12px">只會延後「這一次」的提醒,不影響原本的循環到期規則,下一次還是照原本頻率計算。</div>
+    <div class="chips" id="s-quick" style="margin-bottom:12px">${quick.map(q=>`<button class="chip" data-days="${q.days}">${q.l}</button>`).join('')}</div>
+    <div class="field"><label>或自訂日期</label><input type="date" id="s-date"></div>
+    <div class="dlg-actions">
+      <button class="cancel" id="dlgClose">取消</button>
+      <button class="ok" id="dlgSave">儲存</button>
+    </div>
+  `;
+  dlg.showModal();
+  document.getElementById('s-quick').onclick = (e)=>{
+    const t=e.target.closest('button'); if(!t) return;
+    const d = new Date(); d.setDate(d.getDate()+parseInt(t.dataset.days,10));
+    document.getElementById('s-date').value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    document.querySelectorAll('#s-quick .chip').forEach(x=>x.classList.remove('on'));
+    t.classList.add('on');
+  };
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  document.getElementById('dlgSave').onclick = async ()=>{
+    const dateVal = document.getElementById('s-date').value;
+    if (!dateVal){ alert('請選擇延後到哪一天'); return; }
+    const now = Date.now();
+    state.snoozes = state.snoozes||[];
+    state.snoozes.forEach(s=>{ if (s.billId===billId && s.period===period && !s.deleted){ s.deleted=true; s.up=now; } });
+    state.snoozes.push({ id:uid(), billId, period, snoozeUntil:dateVal, up:now, deleted:false });
     await saveState();
     dlg.close();
     render();
@@ -1052,13 +1126,20 @@ function bindEvents(){
       ev.stopPropagation();
       const id=t.dataset.id, y=parseInt(t.dataset.y,10), m=parseInt(t.dataset.m,10);
       if (isPaid(id,y,m)) return;
-      openPayConfirm(id,y,m);
+      openBillAction(id,y,m);
     }
     else if (act==='unpay'){
       ev.stopPropagation();
       const id=t.dataset.id, y=parseInt(t.dataset.y,10), m=parseInt(t.dataset.m,10);
       const p = paymentFor(id,y,m);
       if (p){ p.deleted=true; p.up=Date.now(); await saveState(); render(); scheduleSync(); }
+    }
+    else if (act==='unsnooze'){
+      ev.stopPropagation();
+      const id=t.dataset.id, period=ymKey(parseInt(t.dataset.y,10),parseInt(t.dataset.m,10));
+      const now = Date.now();
+      state.snoozes.forEach(s=>{ if (s.billId===id && s.period===period && !s.deleted){ s.deleted=true; s.up=now; } });
+      await saveState(); render(); scheduleSync();
     }
     else if (act==='edit-bill'){ ev.stopPropagation(); openBillForm(billById(t.dataset.id)); }
     else if (act==='del-bill'){
@@ -1068,6 +1149,7 @@ function bindEvents(){
         const now=Date.now();
         const b = billById(id); b.deleted=true; b.up=now;
         state.payments.forEach(p=>{ if(p.billId===id){ p.deleted=true; p.up=now; } });
+        (state.snoozes||[]).forEach(s=>{ if(s.billId===id){ s.deleted=true; s.up=now; } });
         await saveState(); render(); scheduleSync();
       });
     }
@@ -1165,7 +1247,7 @@ function importJson(){
       const data = JSON.parse(text);
       if (!data.members) throw new Error('格式不符');
       confirmDialog('匯入會覆蓋目前裝置上的所有記錄,確定嗎?', async ()=>{
-        state = Object.assign({members:[],bills:[],payments:[],expenses:[],customBillCats:[],customExpCats:[]}, data);
+        state = Object.assign({members:[],bills:[],payments:[],expenses:[],customBillCats:[],customExpCats:[],snoozes:[]}, data);
         await saveState();
         render();
         scheduleSync();
