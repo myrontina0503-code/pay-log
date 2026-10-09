@@ -593,7 +593,7 @@ function renderExpense(){
     return `<div class="exp-row" data-act="open-expense" data-id="${e.id}">
       <span class="dot" style="background:${mem?mem.color:'#999'}"></span>
       <div class="main">
-        <div class="store">${escapeHtml(e.store||e.category)}</div>
+        <div class="store">${storeHtml(e)}</div>
         <div class="meta">${escapeHtml(mem?mem.name:'')} · <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${catColor(e.category)};margin-right:3px;vertical-align:middle"></span>${escapeHtml(e.category)} · ${fmtDShort(e.date)}${e.note?' · '+escapeHtml(e.note):''}</div>
       </div>
       <div class="amt">${fmtMoney(e.amount)}</div>
@@ -1048,9 +1048,13 @@ function openImportCsv(){
         const parsed = parseInvoiceCsv(text);
         const existing = new Set(activeExpenses().map(e=>e.invoiceNo).filter(Boolean));
         const now = Date.now();
-        let added = 0, skipped = 0;
+        let added = 0, skipped = 0, skippedCard = 0;
+        const cardPool = {};
+        activeExpenses().filter(e=>e.stmtKey).forEach(e=>{ const k = e.date+'|'+e.amount; cardPool[k] = (cardPool[k]||0)+1; });
         parsed.forEach(g=>{
           if (existing.has(g.invoiceNo)){ skipped++; return; }
+          const ck = g.date+'|'+g.amount;
+          if (cardPool[ck] > 0){ cardPool[ck]--; skippedCard++; return; }
           state.expenses.push({ id:uid(), memberId, amount:g.amount, store:g.store, category:guessCategory(g.store), date:g.date, note:'', invoiceNo:g.invoiceNo, up:now, deleted:false });
           existing.add(g.invoiceNo);
           added++;
@@ -1058,7 +1062,7 @@ function openImportCsv(){
         await saveState();
         render();
         scheduleSync();
-        alert(`匯入完成:新增 ${added} 筆消費${skipped?`,略過 ${skipped} 筆重複發票`:''}`);
+        alert(`匯入完成:新增 ${added} 筆消費${skipped?`,略過 ${skipped} 筆重複發票`:''}${skippedCard?`,略過 ${skippedCard} 筆已由信用卡帳單記錄的消費`:''}`);
       } catch(err){ alert('匯入失敗:檔案格式不正確'); }
     };
     input.click();
@@ -1291,6 +1295,65 @@ function openStatementPreview(res){
     await saveState(); dlg.close(); render(); scheduleSync();
   };
 }
+function stmtImage(e){
+  if (!e.stmtKey) return '';
+  const [sid, idx] = e.stmtKey.split('#');
+  const st = (state.statements||[]).find(x=>x.id===sid && !x.deleted);
+  return (st && st.rows[+idx]) ? (st.rows[+idx].i || '') : '';
+}
+function storeHtml(e){
+  const img = stmtImage(e);
+  return img ? `<img src="${img}" style="height:22px;max-width:100%;object-fit:contain;object-position:left;display:block">` : escapeHtml(e.store||e.category);
+}
+function openStatementToExpenses(id){
+  const st = (state.statements||[]).find(s=>s.id===id);
+  if (!st) return;
+  if (!activeMembers().length){ alert('請先到「設定」新增家庭成員'); return; }
+  const doneKeys = new Set(state.expenses.map(e=>e.stmtKey).filter(Boolean));
+  const pool = {};
+  activeExpenses().filter(e=>!e.stmtKey).forEach(e=>{ const k = e.date+'|'+e.amount; pool[k] = (pool[k]||0)+1; });
+  const plan = [];
+  st.rows.forEach((r,idx)=>{
+    if (r.k !== 'spend') return;
+    const key = id+'#'+idx;
+    const ck = r.d+'|'+r.a;
+    let status;
+    if (doneKeys.has(key)) status = 'done';
+    else if (pool[ck] > 0){ pool[ck]--; status = 'dup'; }
+    else status = 'add';
+    plan.push({ r, idx, key, status });
+  });
+  const toAdd = plan.filter(p=>p.status==='add');
+  const dups = plan.filter(p=>p.status==='dup').length;
+  const done = plan.filter(p=>p.status==='done').length;
+  const addSum = toAdd.reduce((s,p)=>s+p.r.a,0);
+  const tag = { add:'<span style="color:var(--ok);font-weight:800">新增</span>', dup:'<span style="color:var(--muted);font-weight:800">略過·已有相同日期金額</span>', done:'<span style="color:var(--muted);font-weight:800">略過·之前已轉過</span>' };
+  const rowsHtml = plan.map(p=>{
+    const d = p.r.i ? `<img src="${p.r.i}" style="height:22px;max-width:100%;object-fit:contain;object-position:left;display:block">` : escapeHtml(p.r.s||'(無店名)');
+    return `<div class="exp-row" style="${p.status==='add'?'':'opacity:.55'}"><div class="main"><div class="store" style="white-space:normal;font-size:13px">${d}</div><div class="meta">${fmtDShort(p.r.d)} · ${cardLabel(p.r.c)} · ${tag[p.status]}</div></div><div class="amt">${fmtMoney(p.r.a)}</div></div>`;
+  }).join('');
+  const dlg = showDlg(`
+    <div class="dlg-title">轉成消費記錄</div>
+    <div class="field" style="margin-bottom:10px"><label>這些消費算在哪位家人</label><div class="chips" id="cv-member">${activeMembers().map((m,i)=>`<button class="chip ${i===0?'on':''}" data-v="${m.id}">${escapeHtml(m.name)}</button>`).join('')}</div></div>
+    <div class="hint" style="margin-bottom:8px">將新增 <b>${toAdd.length}</b> 筆,共 ${fmtMoney(addSum)}${dups?`;略過 ${dups} 筆(消費記錄已有相同日期和金額,視為重複)`:''}${done?`;${done} 筆之前已轉過`:''}</div>
+    <div style="max-height:36dvh;overflow:auto">${rowsHtml}</div>
+    <div class="dlg-actions">
+      <button class="cancel" id="dlgClose">取消</button>
+      <button class="ok" id="dlgGo" ${toAdd.length?'':'disabled'}>加入 ${toAdd.length} 筆</button>
+    </div>`);
+  document.getElementById('cv-member').onclick = (ev)=>{ const t=ev.target.closest('button'); if(!t) return; document.querySelectorAll('#cv-member .chip').forEach(x=>x.classList.remove('on')); t.classList.add('on'); };
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  document.getElementById('dlgGo').onclick = async ()=>{
+    const memberId = document.querySelector('#cv-member .chip.on')?.dataset.v;
+    const now = Date.now();
+    toAdd.forEach(p=>{
+      const readable = p.r.s || '';
+      state.expenses.push({ id:uid(), memberId, amount:p.r.a, store: readable || ('信用卡 '+cardLabel(p.r.c)), category: readable ? guessCategory(readable) : '其他', date:p.r.d, note:'', stmtKey:p.key, up:now, deleted:false });
+    });
+    await saveState(); dlg.close(); render(); scheduleSync();
+    alert(`已加入 ${toAdd.length} 筆消費`);
+  };
+}
 function openStatementDetail(id){
   const st = (state.statements||[]).find(s=>s.id===id);
   if (!st) return;
@@ -1299,10 +1362,12 @@ function openStatementDetail(id){
     <div class="dlg-title">${st.closeDate.slice(0,7)} 信用卡帳單</div>
     ${statementSummaryHtml(summarizeStatement(rows, st))}
     <div style="max-height:38dvh;overflow:auto">${statementRowsHtml(rows)}</div>
+    <button class="ok" id="dlgConv" style="width:100%;margin-top:12px;padding:12px;border-radius:10px;font-weight:800;background:var(--yellow);color:var(--on-yellow)">轉成消費記錄(算進統計)</button>
     <div class="dlg-actions">
       <button class="cancel" id="dlgClose">關閉</button>
       <button class="ok danger" id="dlgDel">刪除這期</button>
     </div>`);
+  document.getElementById('dlgConv').onclick = ()=>{ dlg.close(); openStatementToExpenses(id); };
   document.getElementById('dlgClose').onclick = ()=> dlg.close();
   document.getElementById('dlgDel').onclick = async ()=>{
     st.deleted = true; st.up = Date.now();
@@ -1333,7 +1398,7 @@ function categoryEntries(cat, year){
   });
   activeExpenses().forEach(e=>{
     if (!e.date.startsWith(year+'-') || e.category!==cat) return;
-    list.push({ kind:'exp', id:e.id, date:e.date, month:parseInt(e.date.split('-')[1],10), label:e.store||e.category, amount:e.amount });
+    list.push({ kind:'exp', id:e.id, date:e.date, month:parseInt(e.date.split('-')[1],10), label:e.store||e.category, img:stmtImage(e), amount:e.amount });
   });
   return list.sort((a,b)=> b.date < a.date ? -1 : (b.date>a.date?1:0));
 }
@@ -1382,7 +1447,7 @@ function openCategoryDetail(cat, year, scrollTop){
     </div>`;
   }).join('');
   const total = entries.reduce((s,e)=>s+e.amount,0);
-  const rows = entries.map(e=>`<div class="exp-row" data-kind="${e.kind}" data-id="${e.id}" style="cursor:pointer"><div class="main"><div class="store">${escapeHtml(e.label)}</div><div class="meta">${e.date}</div></div><div class="amt">${fmtMoney(e.amount)}</div><span style="color:var(--muted)">›</span></div>`).join('');
+  const rows = entries.map(e=>`<div class="exp-row" data-kind="${e.kind}" data-id="${e.id}" style="cursor:pointer"><div class="main"><div class="store">${e.img ? `<img src="${e.img}" style="height:22px;max-width:100%;object-fit:contain;object-position:left;display:block">` : escapeHtml(e.label)}</div><div class="meta">${e.date}</div></div><div class="amt">${fmtMoney(e.amount)}</div><span style="color:var(--muted)">›</span></div>`).join('');
   const dlg = document.getElementById('dlg');
   document.getElementById('dlgBody').innerHTML = `
     <div class="dlg-title">${escapeHtml(cat)} · ${year}年共 ${fmtMoney(total)}</div>
