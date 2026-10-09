@@ -232,6 +232,7 @@ dialog::backdrop { background:rgba(0,0,0,.45); }
 </div>
 <dialog id="dlg"><div class="dlg-body" id="dlgBody"></div></dialog>
 <input type="file" id="csvInput" accept=".csv,text/csv" style="display:none">
+<input type="file" id="pdfInput" accept=".pdf,application/pdf" style="display:none">
 <script>
 'use strict';
 
@@ -279,7 +280,7 @@ const REMINDERS = [0,1,3,5,7];
 const WEEKDAYS = ['日','一','二','三','四','五','六'];
 
 /* ---------- State ---------- */
-let state = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[] };
+let state = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[], statements:[] };
 let syncCfg = null;
 let ui = {
   tab:'home',
@@ -305,7 +306,7 @@ function billById(id){ return state.bills.find(b=>b.id===id); }
 
 async function loadState(){
   const s = await idbGet(KEY);
-  const blank = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[] };
+  const blank = { members:[], bills:[], payments:[], expenses:[], customBillCats:[], customExpCats:[], snoozes:[], statements:[] };
   state = (s && s.members) ? Object.assign(blank, s) : blank;
 }
 function allBillCats(){ return [...BILL_CATS, ...(state.customBillCats||[])]; }
@@ -340,6 +341,7 @@ function mergeState(local, remote){
     payments: mergeArr(local.payments, remote && remote.payments),
     expenses: mergeArr(local.expenses, remote && remote.expenses),
     snoozes: mergeArr(local.snoozes, remote && remote.snoozes),
+    statements: mergeArr(local.statements, remote && remote.statements),
     customBillCats: mergeCatArr(local.customBillCats, remote && remote.customBillCats),
     customExpCats: mergeCatArr(local.customExpCats, remote && remote.customExpCats),
   };
@@ -448,7 +450,7 @@ function render(){
   bindEvents();
 }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function fmtMoney(n){ return '$'+Math.round(n||0).toLocaleString(); }
+function fmtMoney(n){ const v=Math.round(n||0); return (v<0?'-':'')+'$'+Math.abs(v).toLocaleString(); }
 function fmtDShort(dstr){ const [,m,d] = dstr.split('-'); return `${parseInt(m)}/${parseInt(d)}`; }
 
 /* ---------- Home tab ---------- */
@@ -600,6 +602,12 @@ function renderExpense(){
   if (!activeMembers().length){
     return `<div class="empty">請先到「設定」新增家庭成員,才能記錄消費</div>`;
   }
+  const stmts = (state.statements||[]).filter(x=>!x.deleted).sort((a,b)=> a.closeDate<b.closeDate?1:-1);
+  const stmtCard = stmts.length ? `<div class="card"><h2>信用卡帳單</h2>${stmts.map(x=>`
+    <div class="exp-row" data-act="open-stmt" data-id="${x.id}" style="cursor:pointer">
+      <div class="main"><div class="store">${x.closeDate.slice(0,7)} 帳單</div><div class="meta">結帳 ${fmtDShort(x.closeDate)} · ${x.cards.map(c=>cardLabel(c.last4)).join('、')}</div></div>
+      <div class="amt">${fmtMoney(x.total)}</div><span style="color:var(--muted)">›</span>
+    </div>`).join('')}</div>` : '';
   return `
   <div class="h-title">消費記錄</div>
   <div class="month-row" style="margin-top:-6px">
@@ -608,7 +616,8 @@ function renderExpense(){
     <button class="nav" data-act="exp-next">›</button>
   </div>
   <div class="mrow" style="margin-bottom:14px">${mchips}</div>
-  <div class="io-row" style="margin-bottom:12px"><button data-act="import-csv">📥 匯入發票 CSV</button></div>
+  <div class="io-row" style="margin-bottom:12px"><button data-act="import-csv">📥 匯入發票 CSV</button><button data-act="import-pdf">📄 匯入信用卡帳單 PDF</button></div>
+  ${stmtCard}
   <div class="card">${rows || '<div class="empty">這個月還沒有消費紀錄</div>'}</div>
   `;
 }
@@ -1056,6 +1065,260 @@ function openImportCsv(){
   };
 }
 
+/* ---------- Credit card statement PDF (sum amounts) ---------- */
+const PDFJS_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+const ROC_DATE = /^\d{3}\/\d{2}\/\d{2}$/;
+const AMOUNT_RE = /^-?(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/;
+function rocToIso(s){ const [y,m,d]=s.split('/'); return `${parseInt(y,10)+1911}-${m}-${d}`; }
+function looksGarbled(s){
+  let cjk=0, odd=0;
+  for (const ch of String(s||'')){
+    const c = ch.codePointAt(0);
+    if (c>=0x4E00 && c<=0x9FFF) cjk++;
+    else if ((c>=0x0100&&c<=0x024F)||(c>=0x1E00&&c<=0x1EFF)||(c>=0x2190&&c<=0x2BFF)||(c>=0x2E80&&c<=0x2FFF)||(c>=0x3200&&c<=0x4DBF)) odd++;
+  }
+  return odd >= 2 && odd >= cjk;
+}
+function showDlg(html){
+  const dlg = document.getElementById('dlg');
+  document.getElementById('dlgBody').innerHTML = html;
+  if (!dlg.open) dlg.showModal();
+  return dlg;
+}
+async function loadPdfJs(){
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((res,rej)=>{
+    const s = document.createElement('script');
+    s.src = PDFJS_BASE + 'pdf.min.js';
+    s.onload = res;
+    s.onerror = ()=> rej(new Error('無法載入 PDF 讀取元件,請確認網路連線'));
+    document.head.appendChild(s);
+  });
+  const code = await (await fetch(PDFJS_BASE + 'pdf.worker.min.js')).text();
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([code], {type:'text/javascript'}));
+  return window.pdfjsLib;
+}
+async function parseStatementPdf(file){
+  const lib = await loadPdfJs();
+  const task = lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  task.onPassword = (update, reason)=>{
+    const pw = prompt(reason===2 ? '密碼不正確,請再輸入一次 PDF 密碼' : '這份 PDF 有設密碼,請輸入密碼(銀行帳單通常是身分證字號)');
+    if (pw===null || pw==='') task.destroy(); else update(pw);
+  };
+  const pdf = await task.promise;
+  const pages = [];
+  for (let n=1; n<=pdf.numPages; n++){
+    const page = await pdf.getPage(n);
+    const tc = await page.getTextContent();
+    const items = tc.items.map(it=>({ s:it.str.trim(), x:it.transform[4], y:it.transform[5], w:it.width })).filter(it=>it.s);
+    pages.push({ page, items });
+  }
+
+  // anchors = rows that carry two dates (消費日 + 入帳日)
+  pages.forEach(pg=>{
+    const groups = [];
+    pg.items.filter(it=>ROC_DATE.test(it.s)).forEach(d=>{
+      let g = groups.find(g=>Math.abs(g.y-d.y)<=2.5);
+      if (!g){ g = { y:d.y, ds:[] }; groups.push(g); }
+      g.ds.push(d);
+    });
+    pg.anchors = groups.filter(g=>g.ds.length>=2).map(g=>{ g.ds.sort((a,b)=>a.x-b.x); return { y:g.y, d1:g.ds[0], d2:g.ds[1] }; });
+  });
+
+  // amount column = the most common right edge among numeric items on anchor rows
+  const edgeCount = {};
+  pages.forEach(pg=>pg.anchors.forEach(a=>{
+    pg.items.filter(it=>Math.abs(it.y-a.y)<=2.5 && AMOUNT_RE.test(it.s)).forEach(it=>{
+      const k = Math.round((it.x+it.w)/3); edgeCount[k] = (edgeCount[k]||0)+1;
+    });
+  }));
+  const bestK = Object.keys(edgeCount).sort((a,b)=>edgeCount[b]-edgeCount[a])[0];
+  if (bestK === undefined) throw new Error('找不到消費明細,這可能不是信用卡帳單 PDF');
+  const colRight = parseInt(bestK,10)*3;
+
+  const events = [];
+  let skipped = 0;
+  pages.forEach((pg,pi)=>{
+    pg.anchors.forEach(a=>{
+      a.amt = pg.items.find(it=>Math.abs(it.y-a.y)<=2.5 && AMOUNT_RE.test(it.s) && Math.abs((it.x+it.w)-colRight)<=6);
+    });
+    const claimed = new Set();
+    pg.anchors.forEach(a=>{ a.parts = []; });
+    pg.items.forEach(it=>{
+      if (ROC_DATE.test(it.s)) { claimed.add(it); return; }
+      let best=null, bd=1e9;
+      pg.anchors.forEach(a=>{ const dd=Math.abs(it.y-a.y); if (dd<bd){ bd=dd; best=a; } });
+      if (best && bd<=9 && it.x > best.d2.x + best.d2.w - 1 && (!best.amt || it.x < best.amt.x - 1)){
+        best.parts.push(it); claimed.add(it);
+      } else if (best && best.amt && it===best.amt) claimed.add(it);
+    });
+    pg.anchors.forEach(a=>{
+      if (!a.amt){ skipped++; return; }
+      a.parts.sort((p,q)=> (q.y-p.y>4) ? 1 : (p.y-q.y>4) ? -1 : p.x-q.x);
+      events.push({ pi, y:a.y, kind:'row', a });
+    });
+    // possible card header rows (unclaimed rows ending with "(....1234)")
+    const rest = pg.items.filter(it=>!claimed.has(it) && !(pg.anchors.some(a=>a.amt===it)));
+    const rows = [];
+    rest.forEach(it=>{ let r = rows.find(r=>Math.abs(r.y-it.y)<=2.5); if(!r){ r={y:it.y, its:[]}; rows.push(r);} r.its.push(it); });
+    rows.forEach(r=>{
+      r.its.sort((p,q)=>p.x-q.x);
+      const m = r.its.map(i=>i.s).join(' ').match(/[(（][^()（）]*?(\d{4})[)）]\s*$/);
+      if (m && !pg.anchors.some(a=>Math.abs(a.y-r.y)<=9)) events.push({ pi, y:r.y, kind:'head', last4:m[1] });
+    });
+  });
+  events.sort((p,q)=> p.pi-q.pi || q.y-p.y);
+
+  const hasHead = events.some(e=>e.kind==='head');
+  let card = null;
+  const rows = [];
+  events.forEach(e=>{
+    if (e.kind==='head'){ card = e.last4; return; }
+    const a = e.a;
+    const desc = a.parts.map(p=>p.s).join(' ');
+    const amount = parseFloat(a.amt.s.replace(/,/g,''));
+    rows.push({
+      pi:e.pi, ay:a.y,
+      date: rocToIso(a.d1.s), posted: rocToIso(a.d2.s),
+      desc, garbled: looksGarbled(desc), amount,
+      card: hasHead ? (card||'') : '—',
+      kind: hasHead ? (card ? 'spend' : 'pay') : 'spend',
+      box: a.parts.length
+        ? { x1: Math.min(...a.parts.map(p=>p.x)) - 1, x2: Math.max(...a.parts.map(p=>p.x+p.w)) + 2,
+            y1: Math.min(...a.parts.map(p=>p.y)) - 2.5, y2: Math.max(...a.parts.map(p=>p.y)) + 8 }
+        : { x1: a.d2.x + a.d2.w + 1, x2: a.amt.x - 2, y1: a.y - 2.5, y2: a.y + 8 }
+    });
+  });
+  if (!rows.length) throw new Error('找不到消費明細,這可能不是信用卡帳單 PDF');
+
+  // statement header info (page 1): closing date, due date and the summary amounts below them
+  const info = { closeDate:null, dueDate:null, printedNew:null, totalDue:null, minDue:null };
+  const p0 = pages[0].items;
+  const dts = p0.filter(it=>ROC_DATE.test(it.s)).sort((p,q)=> q.y-p.y || p.x-q.x);
+  if (dts[0]) info.closeDate = rocToIso(dts[0].s);
+  if (dts[1]) info.dueDate = rocToIso(dts[1].s);
+  if (dts[1]){
+    const ref = dts[1], refR = ref.x+ref.w;
+    const nums = p0.filter(it=>/^-?[\d,]+$/.test(it.s) && it.y < ref.y-1 && Math.abs((it.x+it.w)-refR)<=14)
+      .sort((p,q)=>q.y-p.y).slice(0,6).map(it=>parseFloat(it.s.replace(/,/g,'')));
+    if (nums.length===6){ info.printedNew = nums[3]; info.totalDue = nums[4]; info.minDue = nums[5]; }
+  }
+  if (!info.closeDate) info.closeDate = rows[rows.length-1].posted;
+
+  if (rows.some(r=>r.garbled)) await cropDescImages(pages, rows);
+  return { pages, rows, info, skipped };
+}
+async function cropDescImages(pages, rows){
+  const cache = {};
+  for (const r of rows){
+    if (!r.garbled) continue;
+    try {
+      if (!cache[r.pi]){
+        const vp = pages[r.pi].page.getViewport({ scale:2 });
+        const cv = document.createElement('canvas');
+        cv.width = vp.width; cv.height = vp.height;
+        await pages[r.pi].page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+        cache[r.pi] = { vp, cv };
+      }
+      const { vp, cv } = cache[r.pi];
+      const rc = vp.convertToViewportRectangle([r.box.x1, r.box.y1, r.box.x2, r.box.y2]);
+      const x1 = Math.min(rc[0],rc[2]), y1 = Math.min(rc[1],rc[3]), x2 = Math.max(rc[0],rc[2]), y2 = Math.max(rc[1],rc[3]);
+      const c2 = document.createElement('canvas');
+      c2.width = Math.max(1, Math.round(x2-x1)); c2.height = Math.max(1, Math.round(y2-y1));
+      c2.getContext('2d').drawImage(cv, x1, y1, x2-x1, y2-y1, 0, 0, c2.width, c2.height);
+      r.img = c2.toDataURL('image/jpeg', 0.7);
+    } catch(e){}
+  }
+}
+function summarizeStatement(rows, info){
+  const spend = rows.filter(r=>r.kind==='spend');
+  const pays = rows.filter(r=>r.kind==='pay');
+  const map = {};
+  spend.forEach(r=>{ const c = map[r.card] || (map[r.card] = { last4:r.card, subtotal:0, count:0 }); c.subtotal += r.amount; c.count++; });
+  return {
+    closeDate: info.closeDate, dueDate: info.dueDate, printedNew: info.printedNew,
+    total: spend.reduce((s,r)=>s+r.amount,0),
+    paid: -pays.reduce((s,r)=>s+r.amount,0), paidCount: pays.length,
+    cards: Object.values(map)
+  };
+}
+function cardLabel(c){ return c==='—' || !c ? '未標示卡號' : '末碼'+c; }
+function statementSummaryHtml(sum){
+  const diff = sum.printedNew!=null ? Math.round(sum.printedNew - sum.total) : null;
+  return `
+    <div class="stat-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+      <div class="stat"><div class="bar" style="background:var(--yellow)"></div><div class="n">${fmtMoney(sum.total)}</div><div class="l">本期消費加總</div></div>
+      <div class="stat"><div class="bar" style="background:var(--ok)"></div><div class="n">${fmtMoney(sum.paid)}</div><div class="l">已繳款(不計入消費)${sum.paidCount?' · '+sum.paidCount+'筆':''}</div></div>
+    </div>
+    ${sum.cards.length ? `<div class="chips" style="flex-wrap:wrap;margin-bottom:10px">${sum.cards.map(c=>`<span class="chip" style="cursor:default">${cardLabel(c.last4)} ${fmtMoney(c.subtotal)} <span class="n">${c.count}筆</span></span>`).join('')}</div>` : ''}
+    ${sum.printedNew!=null ? (diff===0
+      ? `<div class="hint" style="margin-bottom:8px;color:var(--ok)">✓ 與帳單印出的本期新增款項 ${fmtMoney(sum.printedNew)} 相符</div>`
+      : `<div class="hint" style="margin-bottom:8px;color:var(--danger)">⚠ 帳單印出的本期新增款項是 ${fmtMoney(sum.printedNew)},和明細加總差 ${fmtMoney(diff)},可能有明細沒讀到,請對照原帳單</div>`) : ''}
+    ${sum.closeDate ? `<div class="hint" style="margin-bottom:8px">結帳日 ${sum.closeDate}${sum.dueDate?' · 繳款截止 '+sum.dueDate:''}</div>` : ''}`;
+}
+function statementRowsHtml(rows){
+  return rows.map(r=>{
+    const d = r.img ? `<img src="${r.img}" style="height:24px;max-width:100%;object-fit:contain;object-position:left;display:block">`
+      : (r.desc ? escapeHtml(r.desc) : '<span style="color:var(--muted)">(無店名)</span>');
+    const amt = r.amount;
+    return `<div class="exp-row"><div class="main"><div class="store" style="white-space:normal;font-weight:700;font-size:13px">${d}</div><div class="meta">${fmtDShort(r.date)}${r.kind==='pay'?' · 繳款':' · '+cardLabel(r.card)}</div></div><div class="amt" style="${amt<0?'color:var(--ok)':''}">${fmtMoney(amt)}</div></div>`;
+  }).join('');
+}
+function openStatementPreview(res){
+  const sum = summarizeStatement(res.rows, res.info);
+  const dlg = showDlg(`
+    <div class="dlg-title">信用卡帳單加總</div>
+    ${statementSummaryHtml(sum)}
+    ${res.skipped ? `<div class="hint" style="color:var(--danger);margin-bottom:8px">有 ${res.skipped} 筆讀不到金額,已略過</div>` : ''}
+    <div style="max-height:38dvh;overflow:auto">${statementRowsHtml(res.rows)}</div>
+    <div class="dlg-actions">
+      <button class="cancel" id="dlgClose">關閉</button>
+      <button class="ok" id="dlgSave">儲存這期帳單</button>
+    </div>`);
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  document.getElementById('dlgSave').onclick = async ()=>{
+    const now = Date.now();
+    const id = 'stmt-' + sum.closeDate;
+    state.statements = state.statements || [];
+    state.statements = state.statements.filter(s=>s.id!==id);
+    state.statements.push({
+      id, ...sum, up:now, deleted:false,
+      rows: res.rows.map(r=>({ d:r.date, a:r.amount, c:r.card, k:r.kind, s:(r.garbled?'':r.desc) }))
+    });
+    await saveState(); dlg.close(); render(); scheduleSync();
+  };
+}
+function openStatementDetail(id){
+  const st = (state.statements||[]).find(s=>s.id===id);
+  if (!st) return;
+  const rows = st.rows.map(r=>({ date:r.d, amount:r.a, card:r.c, kind:r.k, desc:r.s }));
+  const dlg = showDlg(`
+    <div class="dlg-title">${st.closeDate.slice(0,7)} 信用卡帳單</div>
+    ${statementSummaryHtml(st)}
+    <div style="max-height:38dvh;overflow:auto">${statementRowsHtml(rows)}</div>
+    <div class="dlg-actions">
+      <button class="cancel" id="dlgClose">關閉</button>
+      <button class="ok danger" id="dlgDel">刪除這期</button>
+    </div>`);
+  document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  document.getElementById('dlgDel').onclick = async ()=>{
+    st.deleted = true; st.up = Date.now();
+    await saveState(); dlg.close(); render(); scheduleSync();
+  };
+}
+document.getElementById('pdfInput').addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const dlg = showDlg('<div class="dlg-title">讀取帳單中…</div><div class="hint">第一次使用會下載 PDF 讀取元件,請稍候</div>');
+  try {
+    openStatementPreview(await parseStatementPdf(file));
+  } catch(err){
+    showDlg(`<div class="dlg-title">讀取失敗</div><div class="hint">${escapeHtml(err.message||String(err))}</div><div class="dlg-actions"><button class="cancel" id="dlgClose">關閉</button></div>`);
+    document.getElementById('dlgClose').onclick = ()=> dlg.close();
+  }
+});
+
 /* ---------- Category detail (chart + list) ---------- */
 function categoryEntries(cat, year){
   const list = [];
@@ -1202,6 +1465,8 @@ function bindEvents(){
     else if (act==='exp-pick-member'){ ui.expMember = t.dataset.id; render(); }
     else if (act==='open-expense'){ openExpenseForm(activeExpenses().find(x=>x.id===t.dataset.id)); }
     else if (act==='import-csv'){ openImportCsv(); }
+    else if (act==='import-pdf'){ document.getElementById('pdfInput').click(); }
+    else if (act==='open-stmt'){ openStatementDetail(t.dataset.id); }
     else if (act==='dash-prev-year'){ ui.dashYear--; render(); }
     else if (act==='dash-next-year'){ ui.dashYear++; render(); }
     else if (act==='dash-pick-month'){ ui.dashMonth = parseInt(t.dataset.m,10); render(); }
@@ -1288,7 +1553,7 @@ function importJson(){
       const data = JSON.parse(text);
       if (!data.members) throw new Error('格式不符');
       confirmDialog('匯入會覆蓋目前裝置上的所有記錄,確定嗎?', async ()=>{
-        state = Object.assign({members:[],bills:[],payments:[],expenses:[],customBillCats:[],customExpCats:[],snoozes:[]}, data);
+        state = Object.assign({members:[],bills:[],payments:[],expenses:[],customBillCats:[],customExpCats:[],snoozes:[],statements:[]}, data);
         await saveState();
         render();
         scheduleSync();
