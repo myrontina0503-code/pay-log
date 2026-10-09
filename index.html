@@ -1238,6 +1238,8 @@ function summarizeStatement(rows, info){
   return {
     closeDate: info.closeDate, dueDate: info.dueDate, printedNew: info.printedNew,
     total: spend.reduce((s,r)=>s+r.amount,0),
+    gross: spend.filter(r=>r.amount>0).reduce((s,r)=>s+r.amount,0),
+    credit: spend.filter(r=>r.amount<0).reduce((s,r)=>s+r.amount,0),
     paid: -pays.reduce((s,r)=>s+r.amount,0), paidCount: pays.length,
     cards: Object.values(map)
   };
@@ -1250,6 +1252,7 @@ function statementSummaryHtml(sum){
       <div class="stat"><div class="bar" style="background:var(--yellow)"></div><div class="n">${fmtMoney(sum.total)}</div><div class="l">本期消費加總</div></div>
       <div class="stat"><div class="bar" style="background:var(--ok)"></div><div class="n">${fmtMoney(sum.paid)}</div><div class="l">已繳款(不計入消費)${sum.paidCount?' · '+sum.paidCount+'筆':''}</div></div>
     </div>
+    ${sum.credit ? `<div class="hint" style="margin-bottom:8px">消費 ${fmtMoney(sum.gross)} ,退款/點數折抵 ${fmtMoney(sum.credit)} ,淨額 ${fmtMoney(sum.total)}</div>` : ''}
     ${sum.cards.length ? `<div class="chips" style="flex-wrap:wrap;margin-bottom:10px">${sum.cards.map(c=>`<span class="chip" style="cursor:default">${cardLabel(c.last4)} ${fmtMoney(c.subtotal)} <span class="n">${c.count}筆</span></span>`).join('')}</div>` : ''}
     ${sum.printedNew!=null ? (diff===0
       ? `<div class="hint" style="margin-bottom:8px;color:var(--ok)">✓ 與帳單印出的本期新增款項 ${fmtMoney(sum.printedNew)} 相符</div>`
@@ -1294,7 +1297,7 @@ function openStatementDetail(id){
   const rows = st.rows.map(r=>({ date:r.d, amount:r.a, card:r.c, kind:r.k, desc:r.s }));
   const dlg = showDlg(`
     <div class="dlg-title">${st.closeDate.slice(0,7)} 信用卡帳單</div>
-    ${statementSummaryHtml(st)}
+    ${statementSummaryHtml(summarizeStatement(rows, st))}
     <div style="max-height:38dvh;overflow:auto">${statementRowsHtml(rows)}</div>
     <div class="dlg-actions">
       <button class="cancel" id="dlgClose">關閉</button>
