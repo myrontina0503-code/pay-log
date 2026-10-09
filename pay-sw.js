@@ -1,4 +1,4 @@
-const CACHE = 'pay-log-v1';
+const CACHE = 'pay-log-v2';
 const ASSETS = ['./', './index.html', './pay-manifest.webmanifest', './pay-icon-180.png', './pay-icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -24,6 +24,7 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith((async () => {
     try {
       const fresh = await fetch(new Request(e.request.url, { cache: 'no-store' }));
