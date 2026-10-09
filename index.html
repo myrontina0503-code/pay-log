@@ -1063,15 +1063,46 @@ function categoryEntries(cat, year){
     if (!p.period.startsWith(year+'-')) return;
     const bill = billById(p.billId);
     if (!bill || bill.category!==cat) return;
-    list.push({ date:p.paidDate, month:parseInt(p.period.split('-')[1],10), label:bill.name, amount:p.amount });
+    list.push({ kind:'bill', id:bill.id, date:p.paidDate, month:parseInt(p.period.split('-')[1],10), label:bill.name, amount:p.amount });
   });
   activeExpenses().forEach(e=>{
     if (!e.date.startsWith(year+'-') || e.category!==cat) return;
-    list.push({ date:e.date, month:parseInt(e.date.split('-')[1],10), label:e.store||e.category, amount:e.amount });
+    list.push({ kind:'exp', id:e.id, date:e.date, month:parseInt(e.date.split('-')[1],10), label:e.store||e.category, amount:e.amount });
   });
   return list.sort((a,b)=> b.date < a.date ? -1 : (b.date>a.date?1:0));
 }
-function openCategoryDetail(cat, year){
+function openCategoryPicker(expId, backCat, year, scroll){
+  const exp = state.expenses.find(x=>x.id===expId);
+  const dlg = document.getElementById('dlg');
+  if (!exp){ openCategoryDetail(backCat, year, scroll); return; }
+  document.getElementById('dlgBody').innerHTML = `
+    <div class="dlg-title">調整分類</div>
+    <div class="hint" style="margin-bottom:12px">${escapeHtml(exp.store||exp.category)} · ${exp.date} · ${fmtMoney(exp.amount)}</div>
+    <div class="chips" id="c-cats" style="flex-wrap:wrap">${allExpCats().map(c=>`<button class="chip ${exp.category===c?'on':''}" data-v="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}<button class="chip" data-add="1">＋新增</button></div>
+    <div class="dlg-actions"><button class="cancel" id="dlgClose">返回</button></div>
+  `;
+  dlg.showModal();
+  async function apply(newCat){
+    if (newCat && newCat !== exp.category){
+      exp.category = newCat; exp.up = Date.now();
+      await saveState(); scheduleSync(); render();
+    }
+    dlg.close();
+    openCategoryDetail(backCat, year, scroll);
+  }
+  document.getElementById('c-cats').onclick = async (e)=>{
+    const t = e.target.closest('button'); if(!t) return;
+    if (t.dataset.add){
+      await addCustomCat('exp','c-cats');
+      const sel = document.querySelector('#c-cats .chip.on')?.dataset.v;
+      if (sel && sel !== exp.category) apply(sel);
+      return;
+    }
+    apply(t.dataset.v);
+  };
+  document.getElementById('dlgClose').onclick = ()=>{ dlg.close(); openCategoryDetail(backCat, year, scroll); };
+}
+function openCategoryDetail(cat, year, scrollTop){
   const entries = categoryEntries(cat, year);
   const monthTotals = Array(12).fill(0);
   entries.forEach(e=>{ monthTotals[e.month-1] += e.amount; });
@@ -1085,15 +1116,25 @@ function openCategoryDetail(cat, year){
     </div>`;
   }).join('');
   const total = entries.reduce((s,e)=>s+e.amount,0);
-  const rows = entries.map(e=>`<div class="exp-row"><div class="main"><div class="store">${escapeHtml(e.label)}</div><div class="meta">${e.date}</div></div><div class="amt">${fmtMoney(e.amount)}</div></div>`).join('');
+  const rows = entries.map(e=>`<div class="exp-row" data-kind="${e.kind}" data-id="${e.id}" style="cursor:pointer"><div class="main"><div class="store">${escapeHtml(e.label)}</div><div class="meta">${e.date}</div></div><div class="amt">${fmtMoney(e.amount)}</div><span style="color:var(--muted)">›</span></div>`).join('');
   const dlg = document.getElementById('dlg');
   document.getElementById('dlgBody').innerHTML = `
     <div class="dlg-title">${escapeHtml(cat)} · ${year}年共 ${fmtMoney(total)}</div>
     <div style="display:flex;gap:4px;margin-bottom:16px">${bars}</div>
-    <div style="max-height:50dvh;overflow:auto">${rows || '<div class="empty">今年這個分類還沒有紀錄</div>'}</div>
+    ${rows ? '<div class="hint" style="margin-bottom:6px">點任一筆可調整分類</div>' : ''}
+    <div id="cd-list" style="max-height:50dvh;overflow:auto">${rows || '<div class="empty">今年這個分類還沒有紀錄</div>'}</div>
     <div class="dlg-actions"><button class="cancel" id="dlgClose" style="flex:1">關閉</button></div>
   `;
   dlg.showModal();
+  const listEl = document.getElementById('cd-list');
+  listEl.scrollTop = scrollTop || 0;
+  listEl.onclick = (ev)=>{
+    const row = ev.target.closest('.exp-row'); if (!row) return;
+    const sc = listEl.scrollTop;
+    dlg.close();
+    if (row.dataset.kind === 'exp') openCategoryPicker(row.dataset.id, cat, year, sc);
+    else openBillForm(billById(row.dataset.id));
+  };
   document.getElementById('dlgClose').onclick = ()=> dlg.close();
 }
 
