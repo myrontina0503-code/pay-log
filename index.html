@@ -1214,7 +1214,7 @@ async function cropDescImages(pages, rows){
     if (!r.garbled) continue;
     try {
       if (!cache[r.pi]){
-        const vp = pages[r.pi].page.getViewport({ scale:2 });
+        const vp = pages[r.pi].page.getViewport({ scale:1.6 });
         const cv = document.createElement('canvas');
         cv.width = vp.width; cv.height = vp.height;
         await pages[r.pi].page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
@@ -1226,7 +1226,7 @@ async function cropDescImages(pages, rows){
       const c2 = document.createElement('canvas');
       c2.width = Math.max(1, Math.round(x2-x1)); c2.height = Math.max(1, Math.round(y2-y1));
       c2.getContext('2d').drawImage(cv, x1, y1, x2-x1, y2-y1, 0, 0, c2.width, c2.height);
-      r.img = c2.toDataURL('image/jpeg', 0.7);
+      r.img = c2.toDataURL('image/jpeg', 0.55);
     } catch(e){}
   }
 }
@@ -1286,7 +1286,7 @@ function openStatementPreview(res){
     state.statements = state.statements.filter(s=>s.id!==id);
     state.statements.push({
       id, ...sum, up:now, deleted:false,
-      rows: res.rows.map(r=>({ d:r.date, a:r.amount, c:r.card, k:r.kind, s:(r.garbled?'':r.desc) }))
+      rows: res.rows.map(r=>({ d:r.date, a:r.amount, c:r.card, k:r.kind, s:(r.garbled?'':r.desc), i:(r.img||'') }))
     });
     await saveState(); dlg.close(); render(); scheduleSync();
   };
@@ -1294,7 +1294,7 @@ function openStatementPreview(res){
 function openStatementDetail(id){
   const st = (state.statements||[]).find(s=>s.id===id);
   if (!st) return;
-  const rows = st.rows.map(r=>({ date:r.d, amount:r.a, card:r.c, kind:r.k, desc:r.s }));
+  const rows = st.rows.map(r=>({ date:r.d, amount:r.a, card:r.c, kind:r.k, desc:r.s, img:r.i }));
   const dlg = showDlg(`
     <div class="dlg-title">${st.closeDate.slice(0,7)} 信用卡帳單</div>
     ${statementSummaryHtml(summarizeStatement(rows, st))}
